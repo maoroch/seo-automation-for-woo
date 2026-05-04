@@ -35,10 +35,12 @@ export async function exportCommand(options = {}) {
   const exportData = products.map(p => ({
     id: p.id,
     sku: p.sku,
+    slug: p.slug,                            // slug
     name: p.name,
     title: p.name,
-    meta_title: p.meta_data?.find(m => m.key === '_yoast_wpseo_title')?.value || '',
-    meta_description: p.meta_data?.find(m => m.key === '_yoast_wpseo_metadesc')?.value || '',
+    meta_title: p.meta_data?.find(m => m.key === 'rank_math_title')?.value || '',
+    meta_description: p.meta_data?.find(m => m.key === 'rank_math_description')?.value || '',
+    focus_keyword: p.meta_data?.find(m => m.key === 'rank_math_focus_keyword')?.value || '',
     description: p.description,
     short_description: p.short_description,
     images: p.images.map(img => ({
@@ -58,7 +60,6 @@ export async function exportCommand(options = {}) {
   return filePath;
 }
 
-// парсинг аргументов командной строки
 if (import.meta.url === `file://${process.argv[1]}`) {
   const args = process.argv.slice(2);
   const idsFlag = args.find(arg => arg.startsWith('--ids='));

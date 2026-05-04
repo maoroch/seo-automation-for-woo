@@ -1,4 +1,3 @@
-// src/services/backup.js
 import fs from 'fs/promises';
 import path from 'path';
 
@@ -17,11 +16,4 @@ export async function getLatestBackup() {
   const backups = files.filter(f => f.startsWith('backup_')).sort().reverse();
   if (backups.length === 0) return null;
   return path.join(backupDir, backups[0]);
-}
-
-export async function restoreBackup(backupPath) {
-  const data = await fs.readFile(backupPath, 'utf8');
-  const products = JSON.parse(data);
-  // для каждого продукта восстановить через updateProduct (можно сделать отдельно)
-  return products;
 }
