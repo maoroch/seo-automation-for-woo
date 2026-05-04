@@ -43,3 +43,6 @@ Thumbs.db
 
 /server/data/cache/
 /server/data/cache/**
+
+/server/data/
+/server/data/**
