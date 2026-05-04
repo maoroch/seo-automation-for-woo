@@ -4,7 +4,12 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "export": "node src/commands/export.js",
+    "import": "node src/commands/import.js",
+    "rollback": "node src/commands/rollback.js",
+    "analyze": "node src/commands/analyze.js",
+    "ai": "node src/commands/ai.js"
   },
   "keywords": [],
   "author": "",
@@ -15,6 +20,7 @@
     "cli-table3": "^0.6.5",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "openai": "^6.35.0",
     "zod": "^4.4.3"
   }
 }
