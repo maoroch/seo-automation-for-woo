@@ -41,4 +41,5 @@ Thumbs.db
 .cache/
 .tmp/
 
-server/data/cache/
+/server/data/cache/
+/server/data/cache/**
