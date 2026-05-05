@@ -1,103 +1,258 @@
 // src/commands/ai.js
 import fs from 'fs/promises';
 import path from 'path';
-import { callOpenRouter } from '../lib/openrouter.js';
+import { callOpenRouter, extractJsonFromResponse } from '../lib/openrouter.js';
+import { getTokenLimiter } from '../lib/token-limiter.js';
 
-// Системный промпт — настройте под свои задачи
-const SYSTEM_PROMPT = `Ты — эксперт по SEO для интернет-магазинов. Твоя задача — улучшить SEO-метаданные товаров WooCommerce с плагином Rank Math.
+// ==============================================
+// 1. Системные промпты
+// ==============================================
+const SEO_SYSTEM_PROMPT = `Ты — эксперт по SEO для интернет-магазинов. Твоя задача — генерировать ТОЛЬКО meta_title, meta_description и focus_keyword.
 
+ЖЁСТКИЕ ПРАВИЛА (нарушение недопустимо):
+
+1. ДЛИНА:
+   - meta_title: от 50 до 70 символов включительно.
+   - meta_description: от 120 до 160 символов включительно.
+   - focus_keyword: не более 5 слов.
+
+2. ЗАПРЕЩЕНО:
+   - keyword stuffing (повтор одного и того же ключа 3+ раз).
+   - общие фразы без конкретики.
+   - HTML-теги.
+
+3. ТРЕБОВАНИЯ:
+   - meta_title: начни с ключевого слова, добавь бренд.
+   - meta_description: раскрой пользу, призыв к действию.
+   - focus_keyword: то же ключевое слово, что в meta_title, без бренда.
+
+4. ЕСЛИ ПОЛЯ УЖЕ ХОРОШИ — оставь их.
+
+ОТВЕТ: ТОЛЬКО JSON-массив с полями id, meta_title, meta_description, focus_keyword.
+Никаких пояснений, только JSON.`;
+
+const CONTENT_SYSTEM_PROMPT = `Ты — API, который возвращает только JSON для e-commerce копирайтинга. Верни ТОЛЬКО JSON-массив.
+
+Задача: улучшить description и short_description товара.
 Правила:
-- НЕ меняй HTML-теги в description и short_description (только текст внутри).
-- НЕ меняй id, sku, name, slug, images.
-- Заполни meta_title (50-70 символов) и meta_description (120-160) на русском.
-- Если focus_keyword пустое — предложи одно ключевое слово.
-- Верни ТОЛЬКО валидный JSON массовом формате (массив объектов).
-- Не добавляй лишние поля, кроме: meta_title, meta_description, focus_keyword.
-- Не добавляй пояснений, только JSON.`;
+- Сохраняй HTML-теги, меняй только текст внутри.
+- Заменяй h6/h5 на h2/h3, где уместно.
+- Делай текст информативнее, добавляй ключевые слова.
+- Не выдумывай несуществующие характеристики.
 
-// Функция для отправки всей партии товаров за один запрос (экономия токенов)
-async function enhanceProducts(products, verbose = false) {
-  const userPrompt = `Улучши следующие товары (массив JSON):\n${JSON.stringify(products, null, 2)}\n\nВерни массив JSON с обновлёнными полями meta_title, meta_description, focus_keyword. Не меняй другие поля.`;
-
-  if (verbose) console.log('🔄 Отправка запроса в OpenRouter...');
-  const responseText = await callOpenRouter(SYSTEM_PROMPT, userPrompt, { maxTokens: 8000 });
-
-  // Извлечь JSON из ответа (модель может добавить ```json ... ```)
-  let jsonMatch = responseText.match(/```(?:json)?\s*([\s\S]*?)```/);
-  let cleanedJson = jsonMatch ? jsonMatch[1] : responseText;
-  cleanedJson = cleanedJson.trim();
-
-  let enhanced;
-  try {
-    enhanced = JSON.parse(cleanedJson);
-  } catch (err) {
-    console.error('❌ Не удалось распарсить ответ модели:', err.message);
-    console.error('Ответ модели (первые 500 символов):', cleanedJson.slice(0, 500));
-    throw new Error('Модель вернула невалидный JSON');
+Пример ответа:
+[
+  {
+    "id": 12345,
+    "description": "<p>Улучшенное описание...</p>",
+    "short_description": "<p>Улучшенное краткое описание...</p>"
   }
+]
 
-  // Убедимся, что вернулся массив той же длины
-  if (!Array.isArray(enhanced) || enhanced.length !== products.length) {
-    throw new Error(`Несоответствие длины: ожидалось ${products.length}, получено ${enhanced?.length}`);
+Никаких пояснений, только JSON. Если поля не меняются, верни их как есть.`;
+
+// ==============================================
+// 2. Пост-обработка SEO
+// ==============================================
+function clampString(str, minLen, maxLen, placeholder = '') {
+  if (!str) return placeholder;
+  let trimmed = str.trim();
+  if (trimmed.length < minLen) return trimmed;
+  if (trimmed.length > maxLen) {
+    trimmed = trimmed.slice(0, maxLen - 3).trim() + '…';
   }
-
-  // Обогащаем исходные товары полученными полями
-  const result = products.map((original, idx) => ({
-    ...original,
-    meta_title: enhanced[idx].meta_title || original.meta_title,
-    meta_description: enhanced[idx].meta_description || original.meta_description,
-    focus_keyword: enhanced[idx].focus_keyword || original.focus_keyword,
-  }));
-  return result;
+  return trimmed;
 }
 
-export async function aiCommand(inputFile, outputFile, options = {}) {
-  const { verbose = false } = options;
+function removeKeywordStuffing(text, maxRepetitions = 2) {
+  const words = text.split(/\s+/);
+  const result = [];
+  let lastWord = '';
+  let repeatCount = 0;
+  for (const w of words) {
+    if (w.toLowerCase() === lastWord.toLowerCase()) {
+      repeatCount++;
+      if (repeatCount >= maxRepetitions) continue;
+    } else {
+      repeatCount = 0;
+      lastWord = w;
+    }
+    result.push(w);
+  }
+  return result.join(' ');
+}
 
-  // Читаем исходный JSON
+function postprocessSeoResponse(seoItem, productId) {
+  let fixed = { ...seoItem };
+  let changed = false;
+
+  if (fixed.meta_title) {
+    let newTitle = removeKeywordStuffing(fixed.meta_title);
+    if (newTitle !== fixed.meta_title) {
+      fixed.meta_title = newTitle;
+      changed = true;
+    }
+    const clamped = clampString(fixed.meta_title, 50, 70, fixed.meta_title);
+    if (clamped !== fixed.meta_title) {
+      fixed.meta_title = clamped;
+      changed = true;
+    }
+  }
+  if (fixed.meta_description) {
+    let newDesc = removeKeywordStuffing(fixed.meta_description);
+    if (newDesc !== fixed.meta_description) {
+      fixed.meta_description = newDesc;
+      changed = true;
+    }
+    const clamped = clampString(fixed.meta_description, 120, 160, fixed.meta_description);
+    if (clamped !== fixed.meta_description) {
+      fixed.meta_description = clamped;
+      changed = true;
+    }
+  }
+  if (fixed.focus_keyword && typeof fixed.focus_keyword === 'string') {
+    let kw = fixed.focus_keyword.trim();
+    const words = kw.split(/\s+/);
+    if (words.length > 5) {
+      fixed.focus_keyword = words.slice(0, 5).join(' ');
+      changed = true;
+    }
+  }
+  if (changed) {
+    console.warn(`⚠️ Автокоррекция SEO для товара ${productId}`);
+  }
+  return fixed;
+}
+
+// ==============================================
+// 3. Построение запросов (с обрезкой длинных полей)
+// ==============================================
+function buildUserPromptForSeo(products) {
+  const data = products.map(p => ({
+    id: p.id,
+    name: p.name ? p.name.slice(0, 500) : '', // обрезаем, чтобы уменьшить токены
+    meta_title: p.meta_title,
+    meta_description: p.meta_description,
+    focus_keyword: p.focus_keyword,
+  }));
+  return `Улучши SEO-поля для следующих товаров:\n${JSON.stringify(data, null, 2)}`;
+}
+
+function buildUserPromptForContent(products) {
+  const data = products.map(p => ({
+    id: p.id,
+    description: p.description ? p.description.slice(0, 3000) : '', // обрезаем до 3000 символов
+    short_description: p.short_description,
+  }));
+  return `Улучши description и short_description. Верни ТОЛЬКО JSON-массив. Никаких пояснений.\n\nДанные:\n${JSON.stringify(data, null, 2)}`;
+}
+
+// ==============================================
+// 4. Основная функция запроса к OpenRouter
+// ==============================================
+async function enhanceWithOpenRouter(products, systemPrompt, userPromptBuilder, mode, examples = []) {
+  let finalSystemPrompt = systemPrompt;
+  if (examples.length) {
+    finalSystemPrompt += '\n\nВот примеры желаемого стиля:\n';
+    for (const ex of examples) {
+      finalSystemPrompt += `Оригинал: ${JSON.stringify(ex.original)}\nУлучшенный: ${JSON.stringify(ex.improved)}\n\n`;
+    }
+    finalSystemPrompt += 'Используй эти примеры.';
+  }
+  const userPrompt = userPromptBuilder(products);
+  const maxTokens = mode === 'content' ? 8000 : 4000;
+  const estimatedTokens = (userPrompt.length / 4) + (maxTokens / 2);
+  const limiter = getTokenLimiter(10000, 10 * 60 * 1000);
+  await limiter.waitForTokens(Math.ceil(estimatedTokens));
+
+  const response = await callOpenRouter(finalSystemPrompt, userPrompt, { maxTokens });
+  if (!response || response.trim() === '') throw new Error('OpenRouter вернул пустой ответ');
+  const json = extractJsonFromResponse(response);
+  if (!Array.isArray(json) || json.length !== products.length) throw new Error('Несоответствие длины ответа');
+  return json;
+}
+
+// ==============================================
+// 5. CLI команда
+// ==============================================
+export async function aiCommand(inputFile, outputFile, options = {}) {
+  const { enhanceMode = 'all', verbose = false, examplesFile = null } = options;
+
   let products;
   try {
     const raw = await fs.readFile(inputFile, 'utf8');
     products = JSON.parse(raw);
+    if (!Array.isArray(products)) products = [products];
   } catch (err) {
-    console.error(`❌ Не удалось прочитать файл ${inputFile}:`, err.message);
+    console.error(`❌ Ошибка чтения ${inputFile}:`, err.message);
     return;
   }
 
-  if (!Array.isArray(products)) {
-    console.log('📦 Обнаружен один товар, оборачиваем в массив');
-    products = [products];
+  let examples = [];
+  if (examplesFile) {
+    try {
+      const exRaw = await fs.readFile(examplesFile, 'utf8');
+      examples = JSON.parse(exRaw);
+      console.log(`📚 Загружено ${examples.length} примеров few-shot`);
+    } catch (err) {
+      console.warn(`⚠️ Не удалось загрузить примеры: ${err.message}`);
+    }
   }
 
   console.log(`📦 Загружено товаров: ${products.length}`);
+  let enhancedProducts = [...products];
 
-  // Ограничение для безопасности (бесплатные лимиты)
-  if (products.length > 50) {
-    console.warn('⚠️ Слишком много товаров (более 50). OpenRouter может ограничить. Рекомендую разбить на части.');
+  if (enhanceMode === 'seo') {
+    const seoJson = await enhanceWithOpenRouter(products, SEO_SYSTEM_PROMPT, buildUserPromptForSeo, 'seo', examples);
+    for (let i = 0; i < products.length; i++) {
+      const corrected = postprocessSeoResponse(seoJson[i], products[i].id);
+      enhancedProducts[i] = { ...enhancedProducts[i], ...corrected };
+    }
+  } else if (enhanceMode === 'content') {
+    const contentJson = await enhanceWithOpenRouter(products, CONTENT_SYSTEM_PROMPT, buildUserPromptForContent, 'content', examples);
+    for (let i = 0; i < products.length; i++) {
+      if (contentJson[i].description) enhancedProducts[i].description = contentJson[i].description;
+      if (contentJson[i].short_description) enhancedProducts[i].short_description = contentJson[i].short_description;
+    }
+  } else if (enhanceMode === 'all') {
+    // SEO
+    const seoJson = await enhanceWithOpenRouter(products, SEO_SYSTEM_PROMPT, buildUserPromptForSeo, 'seo', examples);
+    for (let i = 0; i < products.length; i++) {
+      const corrected = postprocessSeoResponse(seoJson[i], products[i].id);
+      enhancedProducts[i] = { ...enhancedProducts[i], ...corrected };
+    }
+    // Content
+    const contentJson = await enhanceWithOpenRouter(products, CONTENT_SYSTEM_PROMPT, buildUserPromptForContent, 'content', examples);
+    for (let i = 0; i < products.length; i++) {
+      if (contentJson[i].description) enhancedProducts[i].description = contentJson[i].description;
+      if (contentJson[i].short_description) enhancedProducts[i].short_description = contentJson[i].short_description;
+    }
   }
 
-  // Вызов API
-  const enhancedProducts = await enhanceProducts(products, verbose);
-
-  // Сохраняем результат
-  const outPath = outputFile || inputFile.replace(/\.json$/, '_ai.json');
+  const outPath = outputFile || inputFile.replace(/\.json$/, `_${enhanceMode}_enhanced.json`);
   await fs.writeFile(outPath, JSON.stringify(enhancedProducts, null, 2));
-  console.log(`✅ Готово. Сохранено в ${outPath}`);
-  console.log('💡 Теперь запустите импорт: node src/commands/import.js --file=' + outPath);
+  console.log(`✅ Сохранено в ${outPath}`);
+  console.log('💡 Запустите импорт: node src/commands/import.js --file=' + outPath);
 }
 
-// CLI
+// CLI парсинг
 if (import.meta.url === `file://${process.argv[1]}`) {
   const args = process.argv.slice(2);
-  const inputFlag = args.find(arg => arg.startsWith('--input='));
-  const outputFlag = args.find(arg => arg.startsWith('--output='));
+  const inputFlag = args.find(a => a.startsWith('--input='));
+  const outputFlag = args.find(a => a.startsWith('--output='));
+  const enhanceFlag = args.find(a => a.startsWith('--enhance='));
   const verboseFlag = args.includes('--verbose');
+  const examplesFlag = args.find(a => a.startsWith('--examples='));
 
   if (!inputFlag) {
-    console.error('Usage: node ai.js --input=export.json [--output=result.json] [--verbose]');
+    console.error('Usage: node ai.js --input=file.json [--output=out.json] [--enhance=seo|content|all] [--verbose] [--examples=examples.json]');
     process.exit(1);
   }
+
   const inputFile = inputFlag.split('=')[1];
   const outputFile = outputFlag ? outputFlag.split('=')[1] : null;
-  aiCommand(inputFile, outputFile, { verbose: verboseFlag }).catch(console.error);
+  const enhanceMode = enhanceFlag ? enhanceFlag.split('=')[1] : 'all';
+  const examplesFile = examplesFlag ? examplesFlag.split('=')[1] : null;
+
+  aiCommand(inputFile, outputFile, { enhanceMode, verbose: verboseFlag, examplesFile }).catch(console.error);
 }

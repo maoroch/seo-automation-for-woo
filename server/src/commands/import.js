@@ -1,55 +1,21 @@
+// src/commands/import.js
 import fs from 'fs/promises';
 import path from 'path';
+import chalk from 'chalk';
 import { updateProduct, getProducts, updateProductSlug } from '../lib/woocommerce.js';
 import { ImportDataSchema } from '../schemas/import.schema.js';
 import { createBackup } from '../services/backup.js';
 import readline from 'readline';
+import { validateHtmlAdvanced } from '../lib/html-validator.js';
 
-// ======================== ПРОСТОЙ HTML-ВАЛИДАТОР (без зависимостей) ========================
-function validateHtml(html, fieldName, productId) {
-  const errors = [];
-  // Стек для отслеживания открытых тегов
-  const stack = [];
-  // Регулярка для нахождения тегов (открывающих, закрывающих, самозакрывающихся)
-  const tagRegex = /<(\/?)([a-zA-Z][a-zA-Z0-9]*)\b[^>]*>/g;
-  // Самозакрывающиеся теги (void elements)
-  const voidTags = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr']);
+// ============================================================
+// 1. Вспомогательные функции сравнения и построения данных
+// ============================================================
 
-  let match;
-  while ((match = tagRegex.exec(html)) !== null) {
-    const isClosing = match[1] === '/';
-    const tagName = match[2].toLowerCase();
-    if (isClosing) {
-      // Закрывающий тег
-      if (stack.length === 0 || stack[stack.length - 1] !== tagName) {
-        errors.push(`Closing tag </${tagName}> without matching opening tag`);
-        continue;
-      }
-      stack.pop();
-    } else {
-      // Открывающий тег
-      if (voidTags.has(tagName)) {
-        continue; // самозакрывающиеся – не добавляем в стек
-      }
-      stack.push(tagName);
-    }
-  }
-
-  if (stack.length > 0) {
-    errors.push(`Unclosed tags: ${stack.join(', ')}`);
-  }
-
-  if (errors.length > 0) {
-    return { valid: false, errors };
-  }
-  return { valid: true, errors: [] };
-}
-// =========================================================================================
-
-// ---- Вспомогательные функции ----
 function getChangedFields(oldProduct, newProduct) {
   const changes = {};
 
+  // Прямые поля
   const directFields = ['name', 'description', 'short_description'];
   for (const field of directFields) {
     const oldVal = oldProduct[field] || '';
@@ -59,10 +25,12 @@ function getChangedFields(oldProduct, newProduct) {
     }
   }
 
+  // Slug (постоянная ссылка)
   if (newProduct.slug !== undefined && oldProduct.slug !== newProduct.slug) {
     changes.slug = { old: oldProduct.slug, new: newProduct.slug };
   }
 
+  // Rank Math meta-поля
   const oldMeta = oldProduct.meta_data || [];
   const oldMetaMap = new Map(oldMeta.map(m => [m.key, m.value]));
   const newTitle = newProduct.meta_title;
@@ -79,6 +47,7 @@ function getChangedFields(oldProduct, newProduct) {
     changes.focus_keyword = { old: oldMetaMap.get('rank_math_focus_keyword') || '', new: newFocus };
   }
 
+  // Изображения (только alt/title)
   const oldImages = oldProduct.images || [];
   const newImages = newProduct.images || [];
   if (newImages.length > 0) {
@@ -111,6 +80,7 @@ function buildUpdateData(changes, oldProduct) {
   if (changes.description) updateData.description = changes.description.new;
   if (changes.short_description) updateData.short_description = changes.short_description.new;
 
+  // Rank Math meta – объединяем, не теряя другие ключи
   if (changes.meta_title || changes.meta_description || changes.focus_keyword) {
     const oldMeta = oldProduct.meta_data || [];
     const metaMap = new Map(oldMeta.map(m => [m.key, m.value]));
@@ -120,6 +90,7 @@ function buildUpdateData(changes, oldProduct) {
     updateData.meta_data = Array.from(metaMap, ([key, value]) => ({ key, value }));
   }
 
+  // Изображения – обновляем alt/title, сохраняя src
   if (changes.images && changes.images.length) {
     const oldImages = oldProduct.images || [];
     const newImages = oldImages.map(oldImg => {
@@ -140,7 +111,9 @@ function buildUpdateData(changes, oldProduct) {
   return updateData;
 }
 
-// ---- Основная функция импорта ----
+// ============================================================
+// 2. Основная функция импорта
+// ============================================================
 export async function importCommand(filePath, options = {}) {
   const { autoConfirm = false, skipHtmlValidation = false } = options;
 
@@ -154,11 +127,13 @@ export async function importCommand(filePath, options = {}) {
     return;
   }
 
+  // Если передан один объект, оборачиваем в массив
   if (!Array.isArray(importProducts) && typeof importProducts === 'object' && importProducts !== null && importProducts.id) {
     console.log('📦 Single product detected, wrapping in array');
     importProducts = [importProducts];
   }
 
+  // Валидация Zod
   const validation = ImportDataSchema.safeParse(importProducts);
   if (!validation.success) {
     console.error('❌ Validation errors:');
@@ -170,7 +145,7 @@ export async function importCommand(filePath, options = {}) {
   const validatedProducts = validation.data;
   console.log(`✅ Validated ${validatedProducts.length} products`);
 
-  // ========== HTML-валидация (если не пропущена) ==========
+  // ========== HTML-валидация с расширенными проверками ==========
   if (!skipHtmlValidation) {
     let hasHtmlErrors = false;
     const htmlFields = ['description', 'short_description'];
@@ -178,31 +153,38 @@ export async function importCommand(filePath, options = {}) {
       for (const field of htmlFields) {
         const html = product[field];
         if (html && typeof html === 'string') {
-          const result = validateHtml(html, field, product.id);
-          if (!result.valid) {
-            console.error(`❌ HTML validation errors in product ${product.id}, field "${field}":`);
-            result.errors.forEach(err => console.error(`    - ${err}`));
+          const errors = validateHtmlAdvanced(html, field, product.id);
+          if (errors.length) {
             hasHtmlErrors = true;
+            console.error(chalk.red(`\n❌ HTML ошибки в товаре ${product.id}, поле "${field}":`));
+            for (const err of errors) {
+              console.error(chalk.red(`   - ${err.message}`));
+              if (err.snippet) {
+                console.error(chalk.yellow(`     Фрагмент: ${err.snippet}`));
+              }
+            }
           }
         }
       }
     }
     if (hasHtmlErrors) {
       const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-      const answer = await new Promise(resolve => rl.question('⚠️ HTML validation failed. Continue import anyway? (y/N): ', resolve));
+      const answer = await new Promise(resolve => rl.question(chalk.yellow('⚠️ Обнаружены критические HTML-проблемы. Продолжить импорт? (y/N): '), resolve));
       rl.close();
       if (answer.toLowerCase() !== 'y') {
-        console.log('❌ Import cancelled due to HTML errors.');
+        console.log(chalk.red('❌ Импорт отменён из-за HTML-ошибок.'));
         return;
       }
     }
   }
 
+  // Получаем актуальные данные из WooCommerce
   const ids = validatedProducts.map(p => p.id);
   console.log(`📡 Fetching current data for ${ids.length} products...`);
   const currentProducts = await getProducts(ids);
   const currentMap = new Map(currentProducts.map(p => [p.id, p]));
 
+  // Собираем изменения
   const allChanges = [];
   for (const newProduct of validatedProducts) {
     const oldProduct = currentMap.get(newProduct.id);
@@ -225,7 +207,7 @@ export async function importCommand(filePath, options = {}) {
     return;
   }
 
-  // Preview diff
+  // ---- Вывод diff ----
   console.log('\n📋 Preview of changes:\n');
   for (const item of allChanges) {
     console.log(`🆔 Product ${item.id} — ${item.name}`);
@@ -246,6 +228,7 @@ export async function importCommand(filePath, options = {}) {
     console.log('');
   }
 
+  // Запрос подтверждения (если не autoConfirm)
   if (!autoConfirm) {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     const answer = await new Promise(resolve => rl.question('⚠️ Apply these changes? (y/N): ', resolve));
@@ -256,10 +239,12 @@ export async function importCommand(filePath, options = {}) {
     }
   }
 
+  // Создаём бекап
   const backupProducts = allChanges.map(item => item.oldProduct);
   const backupPath = await createBackup(backupProducts);
   console.log(`📦 Backup saved to ${backupPath}`);
 
+  // Применяем изменения
   let successCount = 0;
   let failCount = 0;
   for (const item of allChanges) {
@@ -291,7 +276,9 @@ export async function importCommand(filePath, options = {}) {
   console.log(`\n🎉 Import finished: ${successCount} updated, ${failCount} failed.`);
 }
 
-// ---- CLI entry point ----
+// ============================================================
+// 3. CLI точка входа
+// ============================================================
 if (import.meta.url === `file://${process.argv[1]}`) {
   const args = process.argv.slice(2);
   const fileFlag = args.find(arg => arg.startsWith('--file='));
