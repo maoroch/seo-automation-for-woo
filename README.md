@@ -1,34 +1,43 @@
-# WooCommerce SEO Optimizer (Human‑in‑the‑Loop)
+# 🚀 WooCommerce SEO Optimizer (Human-in-the-Loop)
 
-Инструмент для массовой SEO‑оптимизации товаров WooCommerce с поддержкой Rank Math SEO. Работает в полуавтоматическом режиме (Human‑in‑the‑Loop): экспорт товаров → улучшение (через AI или вручную) → валидация → импорт с preview, бекапом и возможностью отката.
+[![Node.js](https://img.shields.io/badge/Node.js-18%2B-green)](https://nodejs.org/)
+[![License](https://img.shields.io/badge/License-MIT-blue)](LICENSE)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
+[![OpenRouter](https://img.shields.io/badge/Powered%20by-OpenRouter-orange)](https://openrouter.ai)
 
-## 🚀 Возможности
+Bulk SEO optimization for WooCommerce + Rank Math — Export → AI enhance (or manual) → validate → preview → import with backup & rollback. Designed for human review and safe, predictable updates.
 
-- Экспорт товаров по ID, категории, slug категории или всех (по умолчанию до 50 товаров за раз, легко расширяется пагинацией).
-- Импорт с preview изменений (diff), запросом подтверждения и автоматическим бекапом.
-- Поддержка Rank Math SEO: `meta_title`, `meta_description`, `focus_keyword`.
-- Обновление `slug` (постоянной ссылки) через WordPress REST API (Application Passwords).
-- HTML‑валидация с подсветкой ошибок: закрытые теги, иерархия заголовков, отсутствующие `alt` у изображений и т.п.
-- Защита для Elementor: обновляется только первый текстовый виджет (описание), технические таблицы остаются нетронутыми.
-- AI‑улучшение SEO‑полей и контента через OpenRouter (экономично и удобно).
-- SEO‑анализатор без AI (оценка 0–100, экспорт в CSV).
-- Rollback — откат последнего импорта.
+---
 
-## 🛠 Установка и настройка
+## ✨ Features
 
-Клонируйте репозиторий и установите зависимости:
+- 📦 Export products by ID, category, slug, or all (default 50, pagination supported).
+- 🔄 Import with diff preview, confirmation prompt, automatic backup, and rollback.
+- 🧠 Rank Math support: meta_title, meta_description, focus_keyword.
+- 🔗 Slug updates via WordPress REST API (permits permalink changes not supported by WooCommerce REST API).
+- 🛡️ Elementor-safe updates: only the first text widget is modified; technical tables and other critical widgets are preserved.
+- 🧰 HTML validation with colored error snippets to prevent malformed content from reaching the site.
+- 🤖 AI enhancement (OpenRouter): fast, cheap, and stable LLM-based rewriting with human-in-the-loop review.
+- 📊 SEO analyzer (no AI): returns a 0–100 score and can export reports to CSV.
+- ⏮️ Rollback: revert the last import from backup.
+
+---
+
+## 🛠 Installation & Setup
+
+Clone and install:
 
 ```bash
-git clone <репозиторий>
+git clone <repo-url>
 cd server
 npm install
 cp .env.example .env
 ```
 
-Пример `.env` (заполните своими значениями):
+Edit `.env` with your credentials:
 
-```ini
-WC_URL=https://ваш-сайт.ру
+```env
+WC_URL=https://your-site.com
 WC_CONSUMER_KEY=ck_...
 WC_CONSUMER_SECRET=cs_...
 WORDPRESS_USER=admin_username
@@ -37,56 +46,63 @@ OPENROUTER_API_KEY=sk-or-v1-...
 OPENROUTER_MODEL=openrouter/auto
 ```
 
-## 📦 Использование
+---
 
-Экспорт товаров:
+## 📦 Usage
 
+1. Export products
 ```bash
-# По ID
 node src/commands/export.js --ids=123,456
-
-# По категории
-node src/commands/export.js --category="Логгеры"
+node src/commands/export.js --category="Loggers"
 ```
 
-AI‑улучшение (только OpenRouter):
-
+2. AI enhancement (OpenRouter)
 ```bash
 node src/commands/ai.js --input=export.json --enhance=all --examples=examples.json --verbose
 ```
 
-Импорт с подтверждением и бекапом:
-
+3. Import with preview & backup
 ```bash
 node src/commands/import.js --file=..._enhanced.json [--yes] [--skip-html-validation]
 ```
 
-Откат последнего импорта:
-
+4. Rollback last import
 ```bash
 node src/commands/rollback.js [--file=backup.json]
 ```
 
-Анализ (без AI):
-
+5. SEO analysis (no AI)
 ```bash
 node src/commands/analyze.js --ids=123 --output=report.csv
 ```
 
-## 🧠 Архитектура
+---
 
-- Source Layer — WooCommerce REST API, WordPress REST API.  
-- Normalization Layer — приведение товаров к единому JSON.  
-- Intelligence Layer — OpenRouter для SEO и контента (без локальных LLM).  
-- Human‑in‑the‑Loop — preview, подтверждение, бекапы и ручная правка.
+## 🧠 Architectural decisions & outcomes
 
-## 🧪 Технологии
+| Decision | Why? | Outcome |
+|---|---|---|
+| JSON storage initially | Fast MVP, no DB overhead | Good for 150–500 products; migrate to PostgreSQL later if needed |
+| OpenRouter over local LLM | Local Ollama was slow/unreliable | Stable, fast, predictable cost |
+| Partial Elementor update | Preserve technical widgets and exact specs | Prevents hallucinations and destructive edits |
+| Human-in-the-Loop previews | Business‑critical changes require review | Zero accidental SEO damage; trusted workflow |
+| Automatic backup & rollback | Safety net for imports | Easy recovery from mistakes |
+| Advanced HTML validation | Detect broken markup early | Avoids broken tables, missing alt tags, malformed headings |
+| Slug updates via WP REST API | WooCommerce REST API lacks slug changes | Full control over permalinks |
 
-- Node.js 18+ (ES modules, native fetch)  
-- OpenRouter API  
-- WooCommerce REST API, WordPress REST API  
-- Zod (валидация), chalk (цветной вывод), readline (интерактив)
+---
 
-## 📄 Лицензия
+## 🧪 Tech stack
 
-MIT
+- Node.js 18+ (ES modules, native fetch)
+- OpenRouter API (LLM aggregation)
+- WooCommerce REST API + WordPress REST API
+- Zod (schema validation)
+- chalk (colored terminal output)
+- readline (interactive confirmations)
+
+---
+
+## 📄 License
+
+MIT © Ilyas Salimov
