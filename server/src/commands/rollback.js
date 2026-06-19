@@ -1,6 +1,26 @@
 import fs from 'fs/promises';
 import path from 'path';
+import chalk from 'chalk';
 import { updateProduct, updateProductSlug } from '../lib/woocommerce.js';
+
+async function mongoRecordRollback(productId, backupFile) {
+  if (!process.env.MONGODB_URI) return;
+  try {
+    const { connectDB } = await import('../db/connection.js');
+    const { Product } = await import('../db/product.model.js');
+    await connectDB();
+    const doc = await Product.findOne({ wc_id: productId });
+    if (!doc) return;
+    doc.addHistory('rollback', [], {
+      source_file: path.basename(backupFile),
+      note: 'Rollback from backup',
+    });
+    doc.task_status = 'idle';
+    await doc.save();
+  } catch (err) {
+    console.warn(chalk.yellow(`  ⚠️  MongoDB update skipped: ${err.message}`));
+  }
+}
 
 export async function rollbackCommand(backupPath = null) {
   if (!backupPath) {
@@ -48,6 +68,7 @@ export async function rollbackCommand(backupPath = null) {
       
       console.log(`✅ Restored product ${product.id} — ${product.name}`);
       success++;
+      await mongoRecordRollback(product.id, backupPath);
     } catch (err) {
       console.error(`❌ Failed to restore product ${product.id}: ${err.message}`);
       failed++;

@@ -9,7 +9,7 @@ const BASE_URL = 'https://openrouter.ai/api/v1/chat/completions';
 export async function callOpenRouter(systemPrompt, userPrompt, options = {}) {
   if (!API_KEY) throw new Error('OPENROUTER_API_KEY is not set in .env');
 
-  const maxTokens = options.maxTokens || 4000; // по умолчанию 4000
+  const maxTokens = options.maxTokens || 10000; // по умолчанию 4000
 
   const response = await fetch(BASE_URL, {
     method: 'POST',
@@ -37,6 +37,7 @@ export async function callOpenRouter(systemPrompt, userPrompt, options = {}) {
   if (!data.choices || !data.choices[0]) {
     throw new Error('OpenRouter вернул некорректный ответ: отсутствуют choices');
   }
+  console.log(`📊 Tokens used: prompt=${data.usage.prompt_tokens}, completion=${data.usage.completion_tokens}, total=${data.usage.total_tokens}`);
 
   const choice = data.choices[0];
   if (choice.finish_reason === 'length') {
