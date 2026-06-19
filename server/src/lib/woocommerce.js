@@ -41,6 +41,65 @@ export async function getProducts(ids = []) {
   return response;
 }
 
+/**
+ * Получить ВСЕ товары каталога постранично.
+ * @param {Object} options
+ * @param {number} options.perPage  — товаров на странице (макс 100)
+ * @param {function} options.onPage — callback(pageProducts, pageNumber) — вызывается после каждой страницы
+ * @param {number} options.delayMs  — задержка между страницами (защита от rate-limit), по умолчанию из WC_SYNC_DELAY_MS или 500ms
+ * @returns {Array} все товары
+ */
+export async function getAllProducts(options = {}) {
+  const { perPage = 100, onPage } = options;
+  const delayMs = options.delayMs ?? parseInt(process.env.WC_SYNC_DELAY_MS || '500');
+  let allProducts = [];
+  let page = 1;
+
+  while (true) {
+    const params = new URLSearchParams();
+    params.append('per_page', perPage);
+    params.append('page', page);
+    params.append('_fields', 'id,sku,name,slug,meta_data,description,short_description,images,categories');
+
+    const products = await requestWithRetry(`products?${params.toString()}`);
+    if (!products.length) break;
+
+    allProducts = allProducts.concat(products);
+    if (onPage) await onPage(products, page);
+
+    if (products.length < perPage) break; // последняя страница
+    page++;
+
+    if (delayMs > 0) {
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+  }
+
+  return allProducts;
+}
+
+/**
+ * request() с автоматическим retry при 429 (Too Many Requests).
+ * Использует экспоненциальный backoff: 1s, 2s, 4s.
+ */
+async function requestWithRetry(endpoint, options = {}, maxRetries = 3) {
+  let lastError;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await request(endpoint, options);
+    } catch (err) {
+      lastError = err;
+      const is429 = err.message.includes('(429)');
+      if (!is429 || attempt === maxRetries) throw err;
+
+      const backoffMs = 1000 * Math.pow(2, attempt);
+      console.warn(`⚠️  Rate limited (429). Retrying in ${backoffMs}ms... (attempt ${attempt + 1}/${maxRetries})`);
+      await new Promise(resolve => setTimeout(resolve, backoffMs));
+    }
+  }
+  throw lastError;
+}
+
 export async function updateProduct(id, data) {
   return request(`products/${id}`, {
     method: 'PUT',

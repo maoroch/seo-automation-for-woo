@@ -8,6 +8,38 @@ import { createBackup } from '../services/backup.js';
 import readline from 'readline';
 import { validateHtmlAdvanced } from '../lib/html-validator.js';
 
+// MongoDB — опционально (только если MONGODB_URI задан)
+async function mongoRecordImport(productId, changes, sourceFile) {
+  if (!process.env.MONGODB_URI) return;
+  try {
+    const { connectDB } = await import('../db/connection.js');
+    const { Product } = await import('../db/product.model.js');
+    await connectDB();
+    const doc = await Product.findOne({ wc_id: productId });
+    if (!doc) return;
+    const historyChanges = Object.entries(changes).map(([field, val]) => ({
+      field,
+      old_value: val.old,
+      new_value: val.new,
+    }));
+    const oldScore = doc.seo_score?.total ?? 0;
+    doc.addHistory('import', historyChanges, {
+      seo_score_before: oldScore,
+      source_file: path.basename(sourceFile),
+    });
+    doc.task_status = 'approved';
+    doc.imported_at = new Date();
+    // Обновляем поля в Mongo чтобы отражали WC
+    for (const [field, val] of Object.entries(changes)) {
+      if (field in doc) doc[field] = val.new;
+    }
+    await doc.save();
+  } catch (err) {
+    // Не прерываем импорт из-за Mongo
+    console.warn(chalk.yellow(`  ⚠️  MongoDB update skipped for ${productId}: ${err.message}`));
+  }
+}
+
 // ============================================================
 // 1. Улучшенная работа с Elementor (рекурсивная замена + создание)
 // ============================================================
@@ -427,6 +459,8 @@ export async function importCommand(filePath, options = {}) {
         if (slugUpdated) console.log(`   🔗 Slug changed to: ${item.changes.slug.new}`);
         if (elementorUpdated) console.log(`   ✏️ Elementor content updated`);
         successCount++;
+        // Пишем в MongoDB историю импорта
+        await mongoRecordImport(item.id, item.changes, filePath);
       } else {
         console.log(`⚠️ No changes applied for product ${item.id}`);
       }

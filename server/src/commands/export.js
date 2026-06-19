@@ -1,6 +1,26 @@
 import { getProducts, getProductsByCategory, getAllCategories } from '../lib/woocommerce.js';
 import fs from 'fs/promises';
 import path from 'path';
+import chalk from 'chalk';
+
+// MongoDB sync — необязателен: если MONGODB_URI не задан, просто пропускаем
+async function trySyncToMongo(products) {
+  if (!process.env.MONGODB_URI) return;
+  try {
+    const { connectDB, disconnectDB } = await import('../db/connection.js');
+    const { syncOneProduct } = await import('../db/sync.service.js');
+    await connectDB();
+    let synced = 0;
+    for (const p of products) {
+      await syncOneProduct(p);
+      synced++;
+    }
+    await disconnectDB();
+    console.log(chalk.cyan(`🍃 MongoDB: synced ${synced} products`));
+  } catch (err) {
+    console.warn(chalk.yellow(`⚠️  MongoDB sync skipped: ${err.message}`));
+  }
+}
 
 export async function exportCommand(options = {}) {
   const { ids: idsArg, category: categoryName, catId } = options;
@@ -57,6 +77,10 @@ export async function exportCommand(options = {}) {
   await fs.writeFile(filePath, JSON.stringify(exportData, null, 2));
 
   console.log(`✅ Exported ${exportData.length} products to ${filePath}`);
+
+  // Синхронизируем в MongoDB (если MONGODB_URI задан)
+  await trySyncToMongo(products);
+
   return filePath;
 }
 
